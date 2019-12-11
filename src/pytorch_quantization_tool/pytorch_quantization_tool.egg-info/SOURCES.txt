@@ -1,0 +1,8 @@
+README.md
+setup.py
+pytorch_quantization_tool/pytorch_quantization_tool.egg-info/PKG-INFO
+pytorch_quantization_tool/pytorch_quantization_tool.egg-info/SOURCES.txt
+pytorch_quantization_tool/pytorch_quantization_tool.egg-info/dependency_links.txt
+pytorch_quantization_tool/pytorch_quantization_tool.egg-info/entry_points.txt
+pytorch_quantization_tool/pytorch_quantization_tool.egg-info/requires.txt
+pytorch_quantization_tool/pytorch_quantization_tool.egg-info/top_level.txt

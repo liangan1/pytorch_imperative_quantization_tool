@@ -1,0 +1,20 @@
+Metadata-Version: 2.1
+Name: pytorch-quantization-tool
+Version: 0.1
+Summary: Repository of pytorch imperatie quantization tool
+Home-page: https://github.com/liangan1/pytorch_imperative_quantization_tool
+Author: Liangang, Zhang
+Author-email: liangang.zhang@intel.com
+License: UNKNOWN
+Description: # pytorch_imperative_quantization_tool
+        
+        Quantization tool is a plugin which is used to help to use pytorch post-trainning quantization. 
+        
+        ![image](https://github.com/liangan1/pytorch_imperative_quantization_tool/blob/master/images/Drawing39.jpg)
+        
+Keywords: quantization post-training fallback auto-tuning
+Platform: UNKNOWN
+Classifier: Intended Audience :: Science/Research
+Classifier: Programming Language :: Python :: 3
+Classifier: Topic :: Scientific/Engineering :: Artificial Intelligence
+Description-Content-Type: text/markdown
