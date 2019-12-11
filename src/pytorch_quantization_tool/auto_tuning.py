@@ -2,11 +2,15 @@ import torch
 from torch.quantization.quantize import _observer_forward_hook
 from torch.quantization import \
     prepare, convert, propagate_qconfig_, add_observer_
+from torch.quantization import \
+    QuantWrapper, QuantStub, DeQuantStub, default_qconfig, default_per_channel_qconfig
 import torch.nn.intrinsic.quantized as nniq
 import torch.nn.quantized as nnq
 import copy
 import numpy as np
 import json
+import os 
+
 
 DEFAULT_QUANTIZED_OP = {
     nnq.Linear,
