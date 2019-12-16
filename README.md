@@ -46,17 +46,6 @@ def quantization_auto_tuning(model, run_fn, run_args, run_calibration,
                            linear, then fallback_op_types={nnq.Linear}
 
     """
-    
-    def prepare_fallback_model(model, fallback_info_directory = "quantized_model"):
-    r"""
-    The auto-tuning tool API for user to prepare fallback quantized model.
-    user can use this model to load quantized parameter
-
-    Args:
-        model:    the model should already be prepared by first two steps in
-        model_directory: directory where store the fallback layer infomation qconfig.json
-    """
-
 ```
 # Design flow chart 
 ![image](https://github.com/liangan1/pytorch_imperative_quantization_tool/blob/master/images/Drawing39.jpg)
