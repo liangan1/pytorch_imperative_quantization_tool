@@ -205,6 +205,24 @@ def save_quantized_model(model, fallback_layers, save_directory="quantized_model
     output_model_file = os.path.join(save_directory, "pytorch_model.bin")
     torch.save(model_to_save.state_dict(), output_model_file)
 
+def prepare_fallback_model(model, fallback_info_directory = "quantized_model"):
+    r"""
+    The auto-tuning tool API for user to prepare fallback quantized model. 
+    user can use this model to load quantized parameter 
+
+    Args:
+        model:    the model should already be prepared by first two steps in    
+        model_directory: directory where store the fallback layer infomation qconfig.json 
+    """
+    qconfig_file = os.join.path(fallback_info_directory, "qconfig.json")
+    with open(qconfig_file) as f:
+         fallback_layers = json.load(f)
+    propagate_qconfig_(model)
+    fallback_layer(model, "", fallback_layers)
+    add_observer_(model)
+    convert(model, inplace = True)
+    return model 
+
 def quantization_auto_tuning(model, run_fn, run_args, run_calibration,
                              calibration_args, metric = "top-1", relative_error = 0.01,
                              absolute_error = 0.01, relative_err_master = True,
