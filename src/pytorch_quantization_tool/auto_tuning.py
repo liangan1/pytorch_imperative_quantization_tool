@@ -30,8 +30,9 @@ DEFAULT_QUANTIZED_OP = {
 
 class DequantQuantWrapper(torch.nn.Module):
     r"""A wrapper class that wraps the input module, adds DeQuantStub and
-    QuantStub and surround the call to module with call to dequant and quant
-    modules.
+    surround the call to module with call to dequant.
+    this is used by fallback layer when the data type of quantized op 
+    is  input:int8/output:int8. 
 
     This is used by the fallback utility functions to add the dequant and
     quant modules, before `convert` function `QuantStub` will just be observer,
@@ -51,6 +52,28 @@ class DequantQuantWrapper(torch.nn.Module):
         X = self.dequant(X)
         X = self.module(X)
         return self.quant(X)
+
+class DequantWrapper(torch.nn.Module):
+    r"""A wrapper class that wraps the input module, adds DeQuantStub and
+    surround the call to module with call to dequant modules. this is used by fallback
+    layer when the data type of quantized op is  input:int8/output:fp32
+
+    This is used by the fallback utility functions to add the dequant and
+    quant modules, before `convert` function `QuantStub` will just be observer,
+    it observes the input tensor, after `convert`, `DeQuantStub`
+    will be swapped to `nnq.DeQuantize` which does actual dequantization. 
+    """
+    def __init__(self, module):
+        super(DequantQuantWrapper, self).__init__()
+        self.add_module('dequant', DeQuantStub())
+        self.add_module('module', module)
+        module.qconfig = None
+        self.train(module.training)
+
+    def forward(self, X):
+        X = self.dequant(X)
+        return self.module(X)
+
 
 class SaveTensorObserver(torch.quantization.observer._ObserverBase):
     r"""
