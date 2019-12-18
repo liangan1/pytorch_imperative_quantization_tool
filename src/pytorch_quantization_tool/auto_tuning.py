@@ -238,7 +238,9 @@ def save_quantized_model(model, qconfig=None, fallback_layers={}, save_directory
     # Save qconfig info
     qconfig_file = os.path.join(save_directory, "qconfig.json")
     with open(qconfig_file, "w") as qconfig_output:
-         json.dump(qconfig_dict, qconfig_output)
+         json_str = json.dumps(qconfig_dict)
+         qconfig_output.write(json_str)
+         
     # Save configuration file (reference to pytorch_transformers repo)
     if hasattr(model, "config"):
        config_file = os.path.join(save_directory, "config.json")
@@ -464,7 +466,7 @@ def quantization_auto_tuning(model, run_fn, run_args, run_calibration,
               print(item)
           pre_int8_accuracy = int8_accuracy
           for layer in candidate_fallback_layers:
-              fined_fallback_layers.update({layer[0]:layer[1]})
+              fined_fallback_layers.update({layer[0]:str(layer[1])})
               _, cur_int8_accuracy = run(model, run_fn=run_fn, run_args=run_args, run_calibration=run_calibration,
                                          calibration_args=calibration_args, qconfig=qconfig, metric=metric, 
                                          fallback_layers=fined_fallback_layers, max_split_quantized=max_split_quantized)
