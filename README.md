@@ -2,7 +2,9 @@
 
 Quantization tool is a plugin which is used to help to use pytorch post-trainning quantization. 
 # Features
-## 1. Fallback layer auto-tuning
+## 1. quantization algorithm auto-tuning
+Tool can automatically validate the accuracy of different quantization algorithm. 
+## 2. Fallback layer auto-tuning
 For some model, some layers with quantized op will reduce the model accuracy obviously which lead to the quantized model can not be applied in the real application. Our tool can automiticall search these layers and fallback these layers to be FP32 op to meet the accuracy goal.   
 # Install
 ```
