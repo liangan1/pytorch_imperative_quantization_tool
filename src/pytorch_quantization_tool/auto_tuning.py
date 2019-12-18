@@ -28,6 +28,16 @@ DEFAULT_QUANTIZED_OP = {
     nniq.ConvReLU2d,
 }
 
+STR2QCONFIG = {
+    "default_qconfig" : default_qconfig,
+    "default_per_channel_qconfig" : default_per_channel_qconfig
+}
+
+QCONFIG2STR = {
+    default_qconfig : "default_qconfig",
+    default_per_channel_qconfig : "default_per_channel_qconfig"
+}
+
 class DequantQuantWrapper(torch.nn.Module):
     r"""A wrapper class that wraps the input module, adds DeQuantStub and
     surround the call to module with call to dequant.
@@ -201,7 +211,7 @@ def compute_fp32_and_int8_dequantize_gap(model, layer_name="", layer_gap_dict={}
     for name, sub_model in model.named_children():
         compute_fp32_and_int8_dequantize_gap(sub_model, layer_name + name + ".", layer_gap_dict)
 
-def save_quantized_model(model, fallback_layers, save_directory="quantized_model", save_config = False):
+def save_quantized_model(model, qconfig=None, fallback_layers={}, save_directory="quantized_model"):
     r"""
     save quantized model info:
     1) fallback_layer info
@@ -211,9 +221,16 @@ def save_quantized_model(model, fallback_layers, save_directory="quantized_model
     Args:
         model: quantized model
         fallback_layers: layers force to be fp32 op
+        qconfig: QConfig used for quantized model 
         save_directory:  directory to save model info
         save_config: if need to save configuration information
     """
+
+    assert qconfig is not None, "qconfig can not be None"
+    assert qconfig in QCONFIG2STR, "qconfig must be in QCONFIG2STR dict"
+
+    qconfig_dict={"qconfig":QCONFIG2STR[qconfig]}
+    qconfig_dict.update({"fallback_layers": fallback_layers})
 
     if not os.path.exists(save_directory):
        os.mkdir(save_directory)
@@ -221,15 +238,15 @@ def save_quantized_model(model, fallback_layers, save_directory="quantized_model
     # Save qconfig info
     qconfig_file = os.path.join(save_directory, "qconfig.json")
     with open(qconfig_file, "w") as qconfig_output:
-         json.dump(fallback_layers, qconfig_output)
+         json.dump(qconfig_dict, qconfig_output)
     # Save configuration file (reference to pytorch_transformers repo)
-    if save_config:
+    if hasattr(model, "config"):
        config_file = os.path.join(save_directory, "config.json")
        with open(config_file, "w", encoding='utf-8') as writer:
             output = copy.deepcopy(model.config.__dict__)
             json_str = json.dumps(output, indent=2, sort_keys=True) + "\n"
             writer.write(json_str)
-    # Only save the model it-self if we are using distributed training
+   
     model_to_save = model.module if hasattr(model, 'module') else model
     output_model_file = os.path.join(save_directory, "pytorch_model.bin")
     torch.save(model_to_save.state_dict(), output_model_file)
@@ -247,9 +264,12 @@ def prepare_fallback_model(model, quantized_model_directory = "quantized_model",
     """
     qconfig_file = os.path.join(quantized_model_directory, "qconfig.json")
     with open(qconfig_file) as f:
-         fallback_layers = json.load(f)
+         qconfig_dict = json.load(f)
+         model.qconfig = STR2QCONFIG[qconfig_dict["qconfig"]]
+         fallback_layers = qconfig_dict["fallback_layers"]
     propagate_qconfig_(model)
-    fallback_layer(model, "", fallback_layers, max_split_quantized)
+    if len(fallback_layers) > 0:
+       fallback_layer(model, "", fallback_layers, max_split_quantized)
     add_observer_(model)
     convert(model, inplace = True)
     quantized_model_file = os.path.join(quantized_model_directory, "pytorch_model.bin")  
@@ -271,10 +291,49 @@ def get_original_quantized_layer(model, layer_name="", layers=[], fallback_op_ty
     for name, child in model.named_children():
         sub_model_layer_name = layer_name + name + "."
         if len(child._modules) == 0 and type(child) in DEFAULT_QUANTIZED_OP:
-           print(sub_model_layer_name)
            layers.append(sub_model_layer_name)
         else:
            get_original_quantized_layer(child, sub_model_layer_name, layers, fallback_op_types)
+
+def run(model, run_fn, run_args, run_calibration=None, calibration_args=None, qconfig=None, metric="acc",
+        fallback_layers=None, tuing_strategy="bottom-up", 
+        save_fp32_tensor=False, save_int8_tensor=False, max_split_quantized=False):
+
+    model_tmp = copy.deepcopy(model)
+
+    #run fp32 evaluation to collect accuracy and fp32 tensor
+    if save_fp32_tensor:
+       propagate_qconfig_(model_tmp)
+       add_save_observer_(model_tmp)
+
+    #run calibration
+    if qconfig is not None:
+       model.qconfig = qconfig
+       propagate_qconfig_(model_tmp)
+       if fallback_layers is not None:
+          fallback_layer(model_tmp, "", fallback_layers, max_split_quantized)
+
+       add_observer_(model_tmp)
+       run_calibration(model_tmp, calibration_args)
+       convert(model_tmp, inplace = True)
+       if save_int8_tensor is True and qconfig == default_per_channel_qconfig:
+          add_save_observer_(model_tmp)
+
+    #run_model
+    result = run_fn(model_tmp, run_args)
+    accuracy=result[metric]
+    return model_tmp, accuracy
+
+def accuracy_is_meet_goal(fp32_accuracy=0.0, int8_accuracy=0.0, relative_err_master=True, 
+                          relative_error=0.01, absolute_error=0.01):
+
+    meet_goal = False
+    if relative_err_master:
+       meet_goal = False if int8_accuracy < fp32_accuracy * (1 - relative_error) else True
+    else:
+       meet_goal = False if int8_accuracy < fp32_accuracy * (1 - absolute_error) else True
+
+    return meet_goal
 
 def quantization_auto_tuning(model, run_fn, run_args, run_calibration,
                              calibration_args, metric = "top-1", relative_error = 0.01,
@@ -283,7 +342,8 @@ def quantization_auto_tuning(model, run_fn, run_args, run_calibration,
                              fallback_op_types=DEFAULT_QUANTIZED_OP,
                              performance_fine_tuning=True,
                              max_split_quantized=False,
-                             tuing_strategy="bottom-up"):
+                             tuing_strategy="bottom-up",
+                             save_config = True):
     r"""
     The auto-tuning tool API for user.
 
@@ -312,35 +372,39 @@ def quantization_auto_tuning(model, run_fn, run_args, run_calibration,
 
     """
     original_quantized_layers = []
-    #run fp32 evaluation to collect accuracy and fp32 tensor
-    model_tmp = copy.deepcopy(model)
-    propagate_qconfig_(model_tmp)
+    fp32_accuracy = 0.0
+    int8_accuracy = 0.0
+    save_fp32_tensor = False
+    save_int8_tensor = False
+    qconfig = None
+    quantized_model = None
+    need_to_fallback = True    
+ 
     if tuing_strategy == "euclidean":
-       add_save_observer_(model_tmp)
-    result = run_fn(model_tmp, run_args)
-    fp32_accuracy = result[metric]
-    #run calibration
-    model_tmp = copy.deepcopy(model)
-    prepare(model_tmp, inplace = True)
-    run_calibration(model_tmp, calibration_args)
+       save_fp32_tensor = True
+       save_int8_tensor = True
+       
+    _, fp32_accuracy = run(model, run_fn=run_fn, run_args=run_args, metric=metric, save_fp32_tensor=save_fp32_tensor)
 
-    #run int8 to collect accuracy and int8 tensor
-    convert(model_tmp, inplace=True)
-    if tuing_strategy == "euclidean":
-       add_save_observer_(model_tmp)
-    elif tuing_strategy == "bottom-up":
-       get_original_quantized_layer(model_tmp, layer_name ="", layers = original_quantized_layers, fallback_op_types=fallback_op_types)
-       original_quantized_layers.reverse()
-    result = run_fn(model_tmp, run_args)
-    int8_accuracy = result[metric]
-    save_quantized_model(model_tmp, {},
-                            save_directory="quantized_model", save_config = True)
-    need_to_fallback = False
-    if relative_err_master:
-       need_to_fallback = True if int8_accuracy < fp32_accuracy * (1 - relative_error) else False
-    else:
-       need_to_fallback = True if int8_accuracy < fp32_accuracy * (1 - absolute_error) else False
-
+    #begin to auto-tuning qconfig 
+    for qconfig_item in QCONFIG2STR:
+        print("####Tuning qconfig:", QCONFIG2STR[qconfig_item])
+        quantized_model, cur_int8_accuracy = run(model, run_fn=run_fn, run_args=run_args, run_calibration=run_calibration, 
+                                             calibration_args=calibration_args, qconfig=qconfig_item, metric=metric, 
+                                             save_int8_tensor=save_int8_tensor)
+        if qconfig is None or cur_int8_accuracy > int8_accuracy:
+           int8_accuracy = cur_int8_accuracy
+           qconfig = qconfig_item 
+        accuracy_meet_goal = accuracy_is_meet_goal(fp32_accuracy,int8_accuracy,relative_err_master,relative_error,
+                                                  absolute_error) 
+        if accuracy_meet_goal:
+           need_to_fallback = False
+           save_quantized_model(quantized_model,  qconfig=qconfig, save_directory=quantized_model_directory)
+           break 
+    get_original_quantized_layer(quantized_model, layer_name ="", layers = original_quantized_layers, fallback_op_types=fallback_op_types)
+    original_quantized_layers.reverse()
+    
+    print("####The best qconfig:", qconfig, "\nBase Acuuracy:", int8_accuracy)
     #begin to fallback auto-tuning
     if need_to_fallback:
        if tuing_strategy == "euclidean":
@@ -350,11 +414,13 @@ def quantization_auto_tuning(model, run_fn, run_args, run_calibration,
            #sort layer according to above distance to construct auto-tuning search order
            sorted_gap = sorted(layer_gap_dict.items(), key=lambda item:item[1], reverse=True)
            original_quantized_layers = [item[0] for item in sorted_gap]
+      
+       print("####fallback search order:")
        for item in original_quantized_layers:
            print(item)
 
-       cur_int8_accuracy = int8_accuracy
        pre_int8_accuracy = int8_accuracy #the currenty best accuacy
+       cur_int8_accuracy = pre_int8_accuracy
        len_gap_dict = len(original_quantized_layers)#the maximum search times
        fallback_layers = {} #bucket to save fallback layers
        accuracy_improvment_dict = {}
@@ -362,28 +428,19 @@ def quantization_auto_tuning(model, run_fn, run_args, run_calibration,
        #fallback auto-tuning
        while need_to_fallback and  count < len_gap_dict:
              #fallback layers in the bucket
-             model_tmp = copy.deepcopy(model)
-             propagate_qconfig_(model_tmp)
              if tuing_strategy == "euclidean":
                 fallback_layers.update({original_quantized_layers[count % len_gap_dict]:False})                
              elif tuing_strategy == "bottom-up":
                 fallback_layers = {original_quantized_layers[count % len_gap_dict]:False}
-             fallback_layer(model_tmp, "", fallback_layers, max_split_quantized)
-
-             #calibration and validate the accuracy of
-             #partitial fallback quantized model_tmp
-             add_observer_(model_tmp)
-             run_calibration(model_tmp, calibration_args)
-             convert(model_tmp, inplace = True)
-             print(model_tmp)
-             result = run_fn(model_tmp, run_args)
-             cur_int8_accuracy=result[metric]
+                print(fallback_layers)
+             _, cur_int8_accuracy = run(model, run_fn=run_fn, run_args=run_args, run_calibration=run_calibration,
+                                        calibration_args=calibration_args, qconfig=qconfig, metric=metric, 
+                                        fallback_layers=fallback_layers,max_split_quantized=max_split_quantized)
              if tuing_strategy == "euclidean":
                 if cur_int8_accuracy > int8_accuracy:
                    accuracy_improvment_dict.update(
                        {original_quantized_layers[count % len_gap_dict]:
                         cur_int8_accuracy - int8_accuracy })
-                   print("accuracy_improvment_dict", accuracy_improvment_dict)
                    pre_int8_accuracy = cur_int8_accuracy
                 else:
                     del fallback_layers[original_quantized_layers[count % len_gap_dict]]
@@ -392,63 +449,44 @@ def quantization_auto_tuning(model, run_fn, run_args, run_calibration,
                    accuracy_improvment_dict.update(
                        {original_quantized_layers[count % len_gap_dict]:
                         cur_int8_accuracy - int8_accuracy })
-                   print("accuracy_improvment_dict", accuracy_improvment_dict)
                    pre_int8_accuracy = cur_int8_accuracy
              count += 1
-             if relative_err_master:
-                need_to_fallback = True if pre_int8_accuracy < fp32_accuracy * (1 - relative_error) else False
-             else:
-                need_to_fallback = True if pre_int8_accuracy < fp32_accuracy * (1 - absolute_error) else False
-       
+             need_to_fallback = not accuracy_is_meet_goal(fp32_accuracy, cur_int8_accuracy, relative_err_master,
+                                                          relative_error, absolute_error) 
        #furtherly search the  subset of fallback_layers to improve performance
        if performance_fine_tuning:
           fined_fallback_layers = {}
           #sort layer by accuracy value difference
           candidate_fallback_layers = sorted(accuracy_improvment_dict.items(),
                             key=lambda item:item[1], reverse=True)
-          print("Candidate fallback_layers:")
+          print("####Candidate fallback_layers:")
           for item in candidate_fallback_layers:
               print(item)
           pre_int8_accuracy = int8_accuracy
           for layer in candidate_fallback_layers:
-              print(type(layer))
-              model_tmp = copy.deepcopy(model)
-              propagate_qconfig_(model_tmp)
               fined_fallback_layers.update({layer[0]:layer[1]})
-              fallback_layer(model_tmp, "", fined_fallback_layers, max_split_quantized)
-
-              #calibration and validate the accuracy of
-              #partitial fallback quantized model_tmp
-              add_observer_(model_tmp)
-              run_calibration(model_tmp, calibration_args)
-              convert(model_tmp, inplace = True)
-              result = run_fn(model_tmp, run_args)
-              cur_int8_accuracy=result[metric]
+              _, cur_int8_accuracy = run(model, run_fn=run_fn, run_args=run_args, run_calibration=run_calibration,
+                                         calibration_args=calibration_args, qconfig=qconfig, metric=metric, 
+                                         fallback_layers=fined_fallback_layers, max_split_quantized=max_split_quantized)
               if cur_int8_accuracy > pre_int8_accuracy:
                  pre_int8_accuracy = cur_int8_accuracy
               else:
                  del fined_fallback_layers[layer[0]]
-              if relative_err_master and cur_int8_accuracy >= fp32_accuracy * (1 - relative_error):
-                 break
-              elif not relative_err_master and cur_int8_accuracy >= fp32_accuracy * (1 - absolute_error):
+              accuracy_meet_goal = accuracy_is_meet_goal(fp32_accuracy, cur_int8_accuracy, relative_err_master,
+                                                          relative_error, absolute_error)
+              if accuracy_meet_goal:
                  break
 
        if performance_fine_tuning:
           fallback_layers = fined_fallback_layers
-
-       propagate_qconfig_(model)
-       fallback_layer(model, "", fallback_layers, max_split_quantized)
-
-       #calibration and validate the accuracy of
-       #partitial fallback quantized model
-       add_observer_(model)
-       run_calibration(model, calibration_args)
-       convert(model, inplace = True)
-       result = run_fn(model, run_args)
-       print("The fallback layers as following:")
+       
+       quantized_model, final_int8_accuracy = run(model, run_fn=run_fn, run_args=run_args, run_calibration=run_calibration, 
+                                                  calibration_args=calibration_args, qconfig=qconfig, metric=metric,                                                                                                                        fallback_layers=fallback_layers, max_split_quantized=max_split_quantized)
+       print("####The fallback layers as following:")
        for layer in fallback_layers.keys():
            print(layer)
-       print("The Int8 accuacy:", result)
-       save_quantized_model(model, fallback_layers=fallback_layers,
-                            save_directory=quantized_model_directory, save_config = True)
+       print("####The Int8 accuacy:", final_int8_accuracy)
+       print(quantized_model)
+       save_quantized_model(quantized_model, fallback_layers=fallback_layers, qconfig=qconfig,
+                            save_directory=quantized_model_directory)
                                     
